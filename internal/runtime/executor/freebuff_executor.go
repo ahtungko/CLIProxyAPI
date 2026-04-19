@@ -26,8 +26,10 @@ import (
 )
 
 const (
-	freebuffAPIBase   = "https://www.codebuff.com"
-	freebuffUserAgent = "freebuff-proxy/1.0"
+	freebuffAPIBase             = "https://www.codebuff.com"
+	freebuffUserAgent           = "freebuff-proxy/1.0"
+	freebuffSessionPollInterval = 5 * time.Second
+	freebuffSessionWaitTimeout  = 15 * time.Minute
 )
 
 // freebuffModelToAgent maps model IDs to Freebuff agent identifiers.
@@ -50,6 +52,32 @@ var globalFreebuffRunCache = &freebuffRunCache{
 	runs: make(map[string]string),
 }
 
+type freebuffSessionState struct {
+	mu         sync.Mutex
+	instanceID string
+	disabled   bool
+}
+
+type freebuffSessionCache struct {
+	mu       sync.Mutex
+	sessions map[string]*freebuffSessionState
+}
+
+var globalFreebuffSessionCache = &freebuffSessionCache{
+	sessions: make(map[string]*freebuffSessionState),
+}
+
+type freebuffSessionResponse struct {
+	Status                 string `json:"status"`
+	InstanceID             string `json:"instanceId"`
+	Position               int    `json:"position"`
+	QueueDepth             int    `json:"queueDepth"`
+	EstimatedWaitMs        int64  `json:"estimatedWaitMs"`
+	RemainingMs            int64  `json:"remainingMs"`
+	GracePeriodRemainingMs int64  `json:"gracePeriodRemainingMs"`
+	Message                string `json:"message"`
+}
+
 func (c *freebuffRunCache) get(key string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -67,6 +95,25 @@ func (c *freebuffRunCache) invalidate(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.runs, key)
+}
+
+func (c *freebuffSessionCache) state(key string) *freebuffSessionState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if state, ok := c.sessions[key]; ok {
+		return state
+	}
+	state := &freebuffSessionState{}
+	c.sessions[key] = state
+	return state
+}
+
+func (c *freebuffSessionCache) invalidate(key string) {
+	state := c.state(key)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.instanceID = ""
+	state.disabled = false
 }
 
 // FreebuffExecutor implements a stateless executor for the Freebuff (Codebuff) proxy.
@@ -162,8 +209,13 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, err
 	}
 
+	instanceID, err := e.ensureActiveSession(ctx, httpClient, baseURL, authToken)
+	if err != nil {
+		return resp, err
+	}
+
 	// Inject codebuff_metadata.
-	translated = injectFreebuffMetadata(translated, runID)
+	translated = injectFreebuffMetadata(translated, runID, instanceID)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/api/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -212,7 +264,32 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 			return resp, err
 		}
 		globalFreebuffRunCache.set(cacheKey, runID)
-		translated = injectFreebuffMetadata(translated, runID)
+		translated = injectFreebuffMetadata(translated, runID, instanceID)
+
+		retryReq, errRetry := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+		if errRetry != nil {
+			return resp, errRetry
+		}
+		applyFreebuffHeaders(retryReq, authToken, true)
+		httpResp, err = httpClient.Do(retryReq)
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	}
+	if retryBody, shouldRetrySession := shouldRetryFreebuffSession(httpResp); shouldRetrySession {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("freebuff executor: close response body error: %v", errClose)
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, retryBody)
+		globalFreebuffSessionCache.invalidate(freebuffSessionCacheKey(authToken))
+
+		instanceID, err = e.ensureActiveSession(ctx, httpClient, baseURL, authToken)
+		if err != nil {
+			return resp, err
+		}
+		translated = injectFreebuffMetadata(translated, runID, instanceID)
 
 		retryReq, errRetry := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 		if errRetry != nil {
@@ -301,7 +378,12 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		return nil, err
 	}
 
-	translated = injectFreebuffMetadata(translated, runID)
+	instanceID, err := e.ensureActiveSession(ctx, httpClient, baseURL, authToken)
+	if err != nil {
+		return nil, err
+	}
+
+	translated = injectFreebuffMetadata(translated, runID, instanceID)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/api/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -350,7 +432,32 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			return nil, err
 		}
 		globalFreebuffRunCache.set(cacheKey, runID)
-		translated = injectFreebuffMetadata(translated, runID)
+		translated = injectFreebuffMetadata(translated, runID, instanceID)
+
+		retryReq, errRetry := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+		if errRetry != nil {
+			return nil, errRetry
+		}
+		applyFreebuffHeaders(retryReq, authToken, true)
+		httpResp, err = httpClient.Do(retryReq)
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	}
+	if retryBody, shouldRetrySession := shouldRetryFreebuffSession(httpResp); shouldRetrySession {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("freebuff executor: close response body error: %v", errClose)
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, retryBody)
+		globalFreebuffSessionCache.invalidate(freebuffSessionCacheKey(authToken))
+
+		instanceID, err = e.ensureActiveSession(ctx, httpClient, baseURL, authToken)
+		if err != nil {
+			return nil, err
+		}
+		translated = injectFreebuffMetadata(translated, runID, instanceID)
 
 		retryReq, errRetry := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 		if errRetry != nil {
@@ -491,6 +598,198 @@ func (e *FreebuffExecutor) getOrCreateRun(ctx context.Context, client *http.Clie
 	return runID, nil
 }
 
+func (e *FreebuffExecutor) ensureActiveSession(ctx context.Context, client *http.Client, baseURL, authToken string) (string, error) {
+	state := globalFreebuffSessionCache.state(freebuffSessionCacheKey(authToken))
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.disabled {
+		return "", nil
+	}
+	if strings.TrimSpace(state.instanceID) != "" {
+		return state.instanceID, nil
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		sessionResp, err := e.postSession(ctx, client, baseURL, authToken)
+		if err != nil {
+			return "", err
+		}
+		instanceID, retry, err := e.resolveSessionStateLocked(ctx, client, baseURL, authToken, state, sessionResp)
+		if err != nil {
+			return "", err
+		}
+		if !retry {
+			return instanceID, nil
+		}
+	}
+
+	return "", statusErr{code: http.StatusConflict, msg: "freebuff executor: failed to establish active session"}
+}
+
+func (e *FreebuffExecutor) resolveSessionStateLocked(ctx context.Context, client *http.Client, baseURL, authToken string, state *freebuffSessionState, sessionResp freebuffSessionResponse) (string, bool, error) {
+	switch sessionResp.Status {
+	case "disabled":
+		state.disabled = true
+		state.instanceID = ""
+		return "", false, nil
+	case "active":
+		if strings.TrimSpace(sessionResp.InstanceID) == "" {
+			return "", false, statusErr{code: http.StatusBadGateway, msg: "freebuff executor: active session missing instance id"}
+		}
+		state.disabled = false
+		state.instanceID = sessionResp.InstanceID
+		return state.instanceID, false, nil
+	case "ended":
+		if strings.TrimSpace(sessionResp.InstanceID) == "" {
+			state.instanceID = ""
+			return "", true, nil
+		}
+		state.disabled = false
+		state.instanceID = sessionResp.InstanceID
+		return state.instanceID, false, nil
+	case "queued":
+		if strings.TrimSpace(sessionResp.InstanceID) == "" {
+			return "", false, statusErr{code: http.StatusBadGateway, msg: "freebuff executor: queued session missing instance id"}
+		}
+		state.disabled = false
+		state.instanceID = sessionResp.InstanceID
+		return e.pollUntilActiveSessionLocked(ctx, client, baseURL, authToken, state, sessionResp)
+	case "none", "superseded":
+		state.instanceID = ""
+		state.disabled = false
+		return "", true, nil
+	default:
+		raw, _ := json.Marshal(sessionResp)
+		return "", false, statusErr{
+			code: http.StatusBadGateway,
+			msg:  fmt.Sprintf("freebuff executor: unexpected session status %q: %s", sessionResp.Status, string(raw)),
+		}
+	}
+}
+
+func (e *FreebuffExecutor) pollUntilActiveSessionLocked(ctx context.Context, client *http.Client, baseURL, authToken string, state *freebuffSessionState, sessionResp freebuffSessionResponse) (string, bool, error) {
+	waitBudget := freebuffSessionWaitTimeout
+	if sessionResp.EstimatedWaitMs > 0 {
+		estimated := time.Duration(sessionResp.EstimatedWaitMs)*time.Millisecond + 30*time.Second
+		if estimated > waitBudget {
+			waitBudget = estimated
+		}
+	}
+	if waitBudget < 30*time.Second {
+		waitBudget = 30 * time.Second
+	}
+
+	waitCtx := ctx
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		waitCtx, cancel = context.WithTimeout(ctx, waitBudget)
+		defer cancel()
+	}
+
+	ticker := time.NewTicker(freebuffSessionPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			return "", false, statusErr{code: http.StatusTooManyRequests, msg: "freebuff executor: timed out waiting for freebuff session admission"}
+		case <-ticker.C:
+		}
+
+		polled, err := e.getSession(waitCtx, client, baseURL, authToken, state.instanceID)
+		if err != nil {
+			return "", false, err
+		}
+		switch polled.Status {
+		case "disabled":
+			state.disabled = true
+			state.instanceID = ""
+			return "", false, nil
+		case "active":
+			if strings.TrimSpace(polled.InstanceID) == "" {
+				return "", false, statusErr{code: http.StatusBadGateway, msg: "freebuff executor: active session missing instance id"}
+			}
+			state.instanceID = polled.InstanceID
+			return state.instanceID, false, nil
+		case "ended":
+			if strings.TrimSpace(polled.InstanceID) == "" {
+				state.instanceID = ""
+				return "", true, nil
+			}
+			state.instanceID = polled.InstanceID
+			return state.instanceID, false, nil
+		case "queued":
+			if strings.TrimSpace(polled.InstanceID) != "" {
+				state.instanceID = polled.InstanceID
+			}
+		case "none", "superseded":
+			state.instanceID = ""
+			return "", true, nil
+		default:
+			raw, _ := json.Marshal(polled)
+			return "", false, statusErr{
+				code: http.StatusBadGateway,
+				msg:  fmt.Sprintf("freebuff executor: unexpected polled session status %q: %s", polled.Status, string(raw)),
+			}
+		}
+	}
+}
+
+func (e *FreebuffExecutor) postSession(ctx context.Context, client *http.Client, baseURL, authToken string) (freebuffSessionResponse, error) {
+	return e.doSessionRequest(ctx, client, baseURL, authToken, http.MethodPost, "", "")
+}
+
+func (e *FreebuffExecutor) getSession(ctx context.Context, client *http.Client, baseURL, authToken, instanceID string) (freebuffSessionResponse, error) {
+	return e.doSessionRequest(ctx, client, baseURL, authToken, http.MethodGet, instanceID, "")
+}
+
+func (e *FreebuffExecutor) doSessionRequest(ctx context.Context, client *http.Client, baseURL, authToken, method, instanceID, body string) (freebuffSessionResponse, error) {
+	var payload io.Reader
+	if body != "" {
+		payload = strings.NewReader(body)
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + "/api/v1/freebuff/session"
+	req, err := http.NewRequestWithContext(ctx, method, url, payload)
+	if err != nil {
+		return freebuffSessionResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	req.Header.Set("User-Agent", freebuffUserAgent)
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(instanceID) != "" {
+		req.Header.Set("X-Freebuff-Instance-Id", instanceID)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return freebuffSessionResponse{}, err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("freebuff executor: close session response body error: %v", errClose)
+		}
+	}()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return freebuffSessionResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return freebuffSessionResponse{}, statusErr{code: resp.StatusCode, msg: string(respBody)}
+	}
+
+	var sessionResp freebuffSessionResponse
+	if err := json.Unmarshal(respBody, &sessionResp); err != nil {
+		return freebuffSessionResponse{}, fmt.Errorf("freebuff executor: failed to decode session response: %w", err)
+	}
+	return sessionResp, nil
+}
+
 // createRun creates a new Agent Run via the Freebuff API.
 // It uses the resolved baseURL so that custom gateways/mirrors are respected.
 func (e *FreebuffExecutor) createRun(ctx context.Context, client *http.Client, baseURL, authToken, agentID string) (string, error) {
@@ -557,13 +856,39 @@ func freebuffRunCacheKey(authToken, agentID string) string {
 	return tokenSuffix + ":" + agentID
 }
 
+func freebuffSessionCacheKey(authToken string) string {
+	return freebuffRunCacheKey(authToken, "session")
+}
+
 // injectFreebuffMetadata injects the codebuff_metadata into the payload.
-func injectFreebuffMetadata(payload []byte, runID string) []byte {
+func injectFreebuffMetadata(payload []byte, runID string, instanceID string) []byte {
 	clientID := fmt.Sprintf("freebuff-proxy-%s", freebuffRandomAlphanumeric(8))
 	payload, _ = sjson.SetBytes(payload, "codebuff_metadata.run_id", runID)
 	payload, _ = sjson.SetBytes(payload, "codebuff_metadata.client_id", clientID)
 	payload, _ = sjson.SetBytes(payload, "codebuff_metadata.cost_mode", "free")
+	if strings.TrimSpace(instanceID) != "" {
+		payload, _ = sjson.SetBytes(payload, "codebuff_metadata.freebuff_instance_id", instanceID)
+	}
 	return payload
+}
+
+func shouldRetryFreebuffSession(resp *http.Response) ([]byte, bool) {
+	if resp == nil {
+		return nil, false
+	}
+	switch resp.StatusCode {
+	case http.StatusConflict, http.StatusGone, http.StatusPreconditionRequired, http.StatusTooManyRequests, http.StatusUpgradeRequired:
+	default:
+		return nil, false
+	}
+	body, _ := io.ReadAll(resp.Body)
+	errCode := gjson.GetBytes(body, "error").String()
+	switch errCode {
+	case "session_superseded", "session_expired", "waiting_room_required", "waiting_room_queued", "freebuff_update_required":
+		return body, true
+	default:
+		return body, false
+	}
 }
 
 // applyFreebuffHeaders sets the required HTTP headers for Freebuff requests.
