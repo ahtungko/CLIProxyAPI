@@ -19,10 +19,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"github.com/tiktoken-go/tokenizer"
 )
 
 const (
@@ -324,7 +326,7 @@ func (e *FreebuffExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 
 	assembledResponse := assembleFreebuffSSEResponse(body, baseModel)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(assembledResponse))
+	reporter.Publish(ctx, freebuffUsageDetailOrEstimate(baseModel, translated, assembledResponse))
 	reporter.EnsurePublished(ctx)
 
 	var param any
@@ -486,6 +488,7 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
+	estimatedInputTokens := freebuffEstimateInputTokens(baseModel, translated)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -496,10 +499,13 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		var sawUsage bool
+		outputSegments := make([]string, 0, 32)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				sawUsage = true
 				reporter.Publish(ctx, detail)
 			}
 			if len(line) == 0 {
@@ -508,6 +514,7 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
 			}
+			freebuffCollectOutputSegments(line, &outputSegments)
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
 			for i := range chunks {
@@ -523,6 +530,9 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+			}
+			if !sawUsage {
+				reporter.Publish(ctx, freebuffEstimateUsageFromSegments(baseModel, estimatedInputTokens, outputSegments))
 			}
 		}
 		reporter.EnsurePublished(ctx)
@@ -886,6 +896,124 @@ func shouldRetryFreebuffSession(resp *http.Response) ([]byte, bool) {
 		return body, true
 	default:
 		return body, false
+	}
+}
+
+func freebuffUsageDetailOrEstimate(baseModel string, requestPayload, responsePayload []byte) usage.Detail {
+	detail := helps.ParseOpenAIUsage(responsePayload)
+	if freebuffHasUsage(detail) {
+		return detail
+	}
+	return freebuffEstimateUsage(baseModel, requestPayload, responsePayload)
+}
+
+func freebuffHasUsage(detail usage.Detail) bool {
+	return detail.InputTokens > 0 ||
+		detail.OutputTokens > 0 ||
+		detail.ReasoningTokens > 0 ||
+		detail.CachedTokens > 0 ||
+		detail.TotalTokens > 0
+}
+
+func freebuffEstimateUsage(baseModel string, requestPayload, responsePayload []byte) usage.Detail {
+	inputTokens := freebuffEstimateInputTokens(baseModel, requestPayload)
+	segments := make([]string, 0, 8)
+	root := gjson.ParseBytes(responsePayload)
+	choices := root.Get("choices")
+	if choices.Exists() && choices.IsArray() {
+		choices.ForEach(func(_, choice gjson.Result) bool {
+			message := choice.Get("message")
+			if content := message.Get("content"); content.Exists() && content.Type == gjson.String {
+				if text := strings.TrimSpace(content.String()); text != "" {
+					segments = append(segments, text)
+				}
+			}
+			toolCalls := message.Get("tool_calls")
+			if toolCalls.Exists() && toolCalls.IsArray() {
+				toolCalls.ForEach(func(_, tc gjson.Result) bool {
+					if name := strings.TrimSpace(tc.Get("function.name").String()); name != "" {
+						segments = append(segments, name)
+					}
+					if args := strings.TrimSpace(tc.Get("function.arguments").String()); args != "" {
+						segments = append(segments, args)
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+	return freebuffEstimateUsageFromSegments(baseModel, inputTokens, segments)
+}
+
+func freebuffEstimateInputTokens(baseModel string, requestPayload []byte) int64 {
+	enc, err := helps.TokenizerForModel(baseModel)
+	if err != nil {
+		return 0
+	}
+	count, err := helps.CountOpenAIChatTokens(enc, requestPayload)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+func freebuffEstimateUsageFromSegments(baseModel string, inputTokens int64, segments []string) usage.Detail {
+	outputTokens := freebuffEstimateOutputTokens(baseModel, segments)
+	return usage.Detail{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+	}
+}
+
+func freebuffEstimateOutputTokens(baseModel string, segments []string) int64 {
+	if len(segments) == 0 {
+		return 0
+	}
+	enc, err := helps.TokenizerForModel(baseModel)
+	if err != nil {
+		return 0
+	}
+	return freebuffCountSegments(enc, segments)
+}
+
+func freebuffCountSegments(enc tokenizer.Codec, segments []string) int64 {
+	if enc == nil || len(segments) == 0 {
+		return 0
+	}
+	joined := strings.TrimSpace(strings.Join(segments, "\n"))
+	if joined == "" {
+		return 0
+	}
+	count, err := enc.Count(joined)
+	if err != nil {
+		return 0
+	}
+	return int64(count)
+}
+
+func freebuffCollectOutputSegments(line []byte, segments *[]string) {
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+		return
+	}
+	root := gjson.ParseBytes(payload)
+	if delta := root.Get("choices.0.delta.content"); delta.Exists() {
+		if text := strings.TrimSpace(delta.String()); text != "" {
+			*segments = append(*segments, text)
+		}
+	}
+	if tcArray := root.Get("choices.0.delta.tool_calls"); tcArray.Exists() && tcArray.IsArray() {
+		tcArray.ForEach(func(_, tc gjson.Result) bool {
+			if name := strings.TrimSpace(tc.Get("function.name").String()); name != "" {
+				*segments = append(*segments, name)
+			}
+			if args := strings.TrimSpace(tc.Get("function.arguments").String()); args != "" {
+				*segments = append(*segments, args)
+			}
+			return true
+		})
 	}
 }
 
