@@ -1897,49 +1897,6 @@
       "description": "Google Gemini 3.1 Flash Lite Preview via Freebuff free tier",
       "context_length": 1048576,
       "max_completion_tokens": 65536
-    },
-    {
-      "id": "google/gemini-3.1-pro-preview",
-      "object": "model",
-      "created": 1771459200,
-      "owned_by": "freebuff",
-      "type": "freebuff",
-      "display_name": "Gemini 3.1 Pro Preview (Free)",
-      "description": "Google Gemini 3.1 Pro Preview via Freebuff free tier",
-      "context_length": 1048576,
-      "max_completion_tokens": 65536,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "openai/gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "freebuff",
-      "type": "freebuff",
-      "display_name": "GPT 5.4 (Connected)",
-      "description": "OpenAI GPT 5.4 via connected ChatGPT subscription in Freebuff",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
     }
   ]
 }
