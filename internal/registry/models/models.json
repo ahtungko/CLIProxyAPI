@@ -1863,5 +1863,72 @@
         ]
       }
     }
+  ],
+  "freebuff": [
+    {
+      "id": "minimax/minimax-m2.7",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "freebuff",
+      "type": "freebuff",
+      "display_name": "Minimax M2.7 (Free)",
+      "description": "Minimax M2.7 via Freebuff free tier",
+      "context_length": 128000,
+      "max_completion_tokens": 16384
+    },
+    {
+      "id": "z-ai/glm-5.1",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "freebuff",
+      "type": "freebuff",
+      "display_name": "GLM 5.1 (Free)",
+      "description": "Z-AI GLM 5.1 via Freebuff free tier",
+      "context_length": 128000,
+      "max_completion_tokens": 16384
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "freebuff",
+      "type": "freebuff",
+      "display_name": "Gemini 2.5 Flash Lite (Free)",
+      "description": "Google Gemini 2.5 Flash Lite via Freebuff free tier",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite-preview",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "freebuff",
+      "type": "freebuff",
+      "display_name": "Gemini 3.1 Flash Lite Preview (Free)",
+      "description": "Google Gemini 3.1 Flash Lite Preview via Freebuff free tier",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "freebuff",
+      "type": "freebuff",
+      "display_name": "Gemini 3.1 Pro Preview (Free)",
+      "description": "Google Gemini 3.1 Pro Preview via Freebuff free tier",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
   ]
 }

@@ -77,6 +77,23 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	t, _ := metadata["type"].(string)
 	if t == "" {
+		// Auto-detect Freebuff credentials.json format: { "default": { "authToken": "..." } }
+		if defaultBlock, ok := metadata["default"].(map[string]any); ok {
+			if authToken, has := defaultBlock["authToken"].(string); has && strings.TrimSpace(authToken) != "" {
+				t = "freebuff"
+				// Flatten "default" block fields into top-level metadata for the executor.
+				metadata["type"] = "freebuff"
+				metadata["authToken"] = authToken
+				if email, ok := defaultBlock["email"].(string); ok {
+					metadata["email"] = email
+				}
+				if name, ok := defaultBlock["name"].(string); ok {
+					metadata["name"] = name
+				}
+			}
+		}
+	}
+	if t == "" {
 		return nil
 	}
 	provider := strings.ToLower(t)
