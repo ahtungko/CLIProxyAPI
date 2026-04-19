@@ -505,8 +505,10 @@ func (e *FreebuffExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				sawUsage = true
-				reporter.Publish(ctx, detail)
+				if freebuffHasUsage(detail) {
+					sawUsage = true
+					reporter.Publish(ctx, detail)
+				}
 			}
 			if len(line) == 0 {
 				continue
