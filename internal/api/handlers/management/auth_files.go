@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,6 +49,7 @@ const (
 	codexCallbackPort     = 1455
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
+	freebuffLoginBaseURL  = "https://freebuff.com"
 )
 
 type callbackForwarder struct {
@@ -1384,6 +1387,209 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		}
 	}
 	return store.Save(ctx, record)
+}
+
+type freebuffLoginStartResponse struct {
+	LoginURL        string `json:"loginUrl"`
+	FingerprintHash string `json:"fingerprintHash"`
+	ExpiresAt       string `json:"expiresAt"`
+}
+
+type freebuffStatusResponse struct {
+	User map[string]any `json:"user"`
+}
+
+func freebuffGenerateFingerprintID() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 26)
+	if _, err := crand.Read(b); err != nil {
+		return fmt.Sprintf("codebuff-cli-%d", time.Now().UnixNano())
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return "codebuff-cli-" + string(b)
+}
+
+func freebuffCredentialFileName(email string) string {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return "freebuff.json"
+	}
+	replacer := strings.NewReplacer(
+		"@", "_at_",
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		" ", "_",
+	)
+	return fmt.Sprintf("freebuff-%s.json", replacer.Replace(email))
+}
+
+func freebuffRequest(ctx context.Context, client *http.Client, method, requestURL string, body any) ([]byte, error) {
+	var payload io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = bytes.NewReader(raw)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "freebuff-proxy/1.0")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("freebuff auth request failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return respBody, nil
+}
+
+func (h *Handler) RequestFreebuffToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	log.Info("Initializing Freebuff authentication...")
+
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	fingerprintID := freebuffGenerateFingerprintID()
+	client := &http.Client{Timeout: 20 * time.Second}
+	startURL := freebuffLoginBaseURL + "/api/auth/cli/code"
+	respBody, err := freebuffRequest(ctx, client, http.MethodPost, startURL, map[string]string{
+		"fingerprintId": fingerprintID,
+	})
+	if err != nil {
+		log.Errorf("Failed to start Freebuff login: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start freebuff login"})
+		return
+	}
+
+	var startResp freebuffLoginStartResponse
+	if err := json.Unmarshal(respBody, &startResp); err != nil {
+		log.Errorf("Failed to decode Freebuff login response: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid freebuff login response"})
+		return
+	}
+	if strings.TrimSpace(startResp.LoginURL) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "missing freebuff login url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "freebuff")
+
+	go func() {
+		pollClient := &http.Client{Timeout: 20 * time.Second}
+		deadline := time.Now().Add(5 * time.Minute)
+		for {
+			if !IsOAuthSessionPending(state, "freebuff") {
+				return
+			}
+			if time.Now().After(deadline) {
+				SetOAuthSessionError(state, "Timeout waiting for Freebuff login")
+				return
+			}
+
+			statusURL := fmt.Sprintf(
+				"%s/api/auth/cli/status?fingerprintId=%s&fingerprintHash=%s&expiresAt=%s",
+				freebuffLoginBaseURL,
+				url.QueryEscape(fingerprintID),
+				url.QueryEscape(startResp.FingerprintHash),
+				url.QueryEscape(startResp.ExpiresAt),
+			)
+			statusBody, err := freebuffRequest(ctx, pollClient, http.MethodGet, statusURL, nil)
+			if err != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			var statusResp freebuffStatusResponse
+			if err := json.Unmarshal(statusBody, &statusResp); err != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			user := statusResp.User
+			if len(user) == 0 {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			authToken := strings.TrimSpace(fmt.Sprint(user["authToken"]))
+			if authToken == "" || authToken == "<nil>" {
+				authToken = strings.TrimSpace(fmt.Sprint(user["auth_token"]))
+			}
+			if authToken == "" || authToken == "<nil>" {
+				SetOAuthSessionError(state, "Freebuff login succeeded but auth token is missing")
+				return
+			}
+
+			email := strings.TrimSpace(fmt.Sprint(user["email"]))
+			name := strings.TrimSpace(fmt.Sprint(user["name"]))
+			record := &coreauth.Auth{
+				ID:       freebuffCredentialFileName(email),
+				Provider: "freebuff",
+				FileName: freebuffCredentialFileName(email),
+				Label:    email,
+				Metadata: map[string]any{
+					"default": map[string]any{
+						"id":        user["id"],
+						"name":      name,
+						"email":     email,
+						"authToken": authToken,
+						"credits":   user["credits"],
+					},
+				},
+			}
+			if strings.TrimSpace(record.Label) == "" {
+				record.Label = "freebuff"
+			}
+
+			savedPath, errSave := h.saveTokenRecord(ctx, record)
+			if errSave != nil {
+				log.Errorf("Failed to save Freebuff auth file: %v", errSave)
+				SetOAuthSessionError(state, "Failed to save Freebuff auth file")
+				return
+			}
+
+			CompleteOAuthSession(state)
+			CompleteOAuthSessionsByProvider("freebuff")
+			log.Infof("Freebuff authentication successful; token saved to %s", savedPath)
+			return
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": startResp.LoginURL, "state": state})
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
