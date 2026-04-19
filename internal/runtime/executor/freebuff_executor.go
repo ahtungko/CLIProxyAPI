@@ -32,11 +32,12 @@ const (
 
 // freebuffModelToAgent maps model IDs to Freebuff agent identifiers.
 var freebuffModelToAgent = map[string]string{
-	"minimax/minimax-m2.7":                 "base2-free",
+	"minimax/minimax-m2.7":                 "base2-free", // legacy alias
 	"z-ai/glm-5.1":                         "base2-free",
 	"google/gemini-2.5-flash-lite":         "file-picker",
 	"google/gemini-3.1-flash-lite-preview": "file-picker-max",
 	"google/gemini-3.1-pro-preview":        "thinker-with-files-gemini",
+	"openai/gpt-5.4":                       "thinker-gpt",
 }
 
 // freebuffRunCache stores the cached Agent Run IDs per auth token + agent pair.
