@@ -1392,7 +1392,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 type freebuffLoginStartResponse struct {
 	LoginURL        string `json:"loginUrl"`
 	FingerprintHash string `json:"fingerprintHash"`
-	ExpiresAt       string `json:"expiresAt"`
+	ExpiresAt       int64  `json:"expiresAt"`
 }
 
 type freebuffStatusResponse struct {
@@ -1525,7 +1525,7 @@ func (h *Handler) RequestFreebuffToken(c *gin.Context) {
 				freebuffLoginBaseURL,
 				url.QueryEscape(fingerprintID),
 				url.QueryEscape(startResp.FingerprintHash),
-				url.QueryEscape(startResp.ExpiresAt),
+				url.QueryEscape(strconv.FormatInt(startResp.ExpiresAt, 10)),
 			)
 			statusBody, err := freebuffRequest(ctx, pollClient, http.MethodGet, statusURL, nil)
 			if err != nil {
