@@ -17,6 +17,7 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
+	Qwen        []*ModelInfo `json:"qwen"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	Freebuff    []*ModelInfo `json:"freebuff"`
@@ -67,6 +68,11 @@ func GetCodexProModels() []*ModelInfo {
 	return cloneModelInfos(getModels().CodexPro)
 }
 
+// GetQwenModels returns the standard Qwen model definitions.
+func GetQwenModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Qwen)
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
@@ -104,6 +110,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - gemini-cli
 //   - aistudio
 //   - codex
+//   - qwen
 //   - kimi
 //   - antigravity
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -121,6 +128,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
+	case "qwen":
+		return GetQwenModels()
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
@@ -147,6 +156,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
+		data.Qwen,
 		data.Kimi,
 		data.Antigravity,
 		data.Freebuff,

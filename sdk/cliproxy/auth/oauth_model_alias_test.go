@@ -172,6 +172,14 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 	}
 }
 
+func TestOAuthModelAliasChannel_Qwen(t *testing.T) {
+	t.Parallel()
+
+	if got := OAuthModelAliasChannel("qwen", "oauth"); got != "qwen" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "qwen")
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 

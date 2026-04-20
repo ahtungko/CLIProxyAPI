@@ -1625,6 +1625,27 @@
       }
     }
   ],
+  "qwen": [
+    {
+      "id": "coder-model",
+      "object": "model",
+      "created": 1771171200,
+      "owned_by": "qwen",
+      "type": "qwen",
+      "display_name": "Qwen 3.6 Plus",
+      "version": "3.6",
+      "description": "efficient hybrid model with leading coding performance",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stream",
+        "stop"
+      ]
+    }
+  ],
   "kimi": [
     {
       "id": "kimi-k2",

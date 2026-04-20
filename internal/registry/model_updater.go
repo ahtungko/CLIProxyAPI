@@ -123,18 +123,45 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	// Preserve locally embedded models for providers not yet upstreamed.
 	if oldData != nil {
-		if len(parsed.Claude) == 0 && len(oldData.Claude) > 0 { parsed.Claude = oldData.Claude }
-		if len(parsed.Gemini) == 0 && len(oldData.Gemini) > 0 { parsed.Gemini = oldData.Gemini }
-		if len(parsed.Vertex) == 0 && len(oldData.Vertex) > 0 { parsed.Vertex = oldData.Vertex }
-		if len(parsed.GeminiCLI) == 0 && len(oldData.GeminiCLI) > 0 { parsed.GeminiCLI = oldData.GeminiCLI }
-		if len(parsed.AIStudio) == 0 && len(oldData.AIStudio) > 0 { parsed.AIStudio = oldData.AIStudio }
-		if len(parsed.CodexFree) == 0 && len(oldData.CodexFree) > 0 { parsed.CodexFree = oldData.CodexFree }
-		if len(parsed.CodexTeam) == 0 && len(oldData.CodexTeam) > 0 { parsed.CodexTeam = oldData.CodexTeam }
-		if len(parsed.CodexPlus) == 0 && len(oldData.CodexPlus) > 0 { parsed.CodexPlus = oldData.CodexPlus }
-		if len(parsed.CodexPro) == 0 && len(oldData.CodexPro) > 0 { parsed.CodexPro = oldData.CodexPro }
-		if len(parsed.Kimi) == 0 && len(oldData.Kimi) > 0 { parsed.Kimi = oldData.Kimi }
-		if len(parsed.Antigravity) == 0 && len(oldData.Antigravity) > 0 { parsed.Antigravity = oldData.Antigravity }
-		if len(parsed.Freebuff) == 0 && len(oldData.Freebuff) > 0 { parsed.Freebuff = oldData.Freebuff }
+		if len(parsed.Claude) == 0 && len(oldData.Claude) > 0 {
+			parsed.Claude = oldData.Claude
+		}
+		if len(parsed.Gemini) == 0 && len(oldData.Gemini) > 0 {
+			parsed.Gemini = oldData.Gemini
+		}
+		if len(parsed.Vertex) == 0 && len(oldData.Vertex) > 0 {
+			parsed.Vertex = oldData.Vertex
+		}
+		if len(parsed.GeminiCLI) == 0 && len(oldData.GeminiCLI) > 0 {
+			parsed.GeminiCLI = oldData.GeminiCLI
+		}
+		if len(parsed.AIStudio) == 0 && len(oldData.AIStudio) > 0 {
+			parsed.AIStudio = oldData.AIStudio
+		}
+		if len(parsed.CodexFree) == 0 && len(oldData.CodexFree) > 0 {
+			parsed.CodexFree = oldData.CodexFree
+		}
+		if len(parsed.CodexTeam) == 0 && len(oldData.CodexTeam) > 0 {
+			parsed.CodexTeam = oldData.CodexTeam
+		}
+		if len(parsed.CodexPlus) == 0 && len(oldData.CodexPlus) > 0 {
+			parsed.CodexPlus = oldData.CodexPlus
+		}
+		if len(parsed.CodexPro) == 0 && len(oldData.CodexPro) > 0 {
+			parsed.CodexPro = oldData.CodexPro
+		}
+		if len(parsed.Qwen) == 0 && len(oldData.Qwen) > 0 {
+			parsed.Qwen = oldData.Qwen
+		}
+		if len(parsed.Kimi) == 0 && len(oldData.Kimi) > 0 {
+			parsed.Kimi = oldData.Kimi
+		}
+		if len(parsed.Antigravity) == 0 && len(oldData.Antigravity) > 0 {
+			parsed.Antigravity = oldData.Antigravity
+		}
+		if len(parsed.Freebuff) == 0 && len(oldData.Freebuff) > 0 {
+			parsed.Freebuff = oldData.Freebuff
+		}
 	}
 
 	// Detect changes before updating store.
@@ -229,6 +256,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexTeam, newData.CodexTeam},
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
+		{"qwen", oldData.Qwen, newData.Qwen},
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 	}
